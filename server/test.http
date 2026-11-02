@@ -1,0 +1,16 @@
+POST http://127.0.0.1:5000/api/register
+Content-Type: application/json
+
+{
+  "name": "Madhu",
+  "email": "madhu123@gmail.com",
+  "password": "Madhu@123"
+}
+###
+POST http://127.0.0.1:5000/api/login
+Content-Type: application/json
+
+{
+  "email": "madhuborra00@gmail.com",
+  "password": "Madhunani222"
+}
