@@ -1,86 +1,124 @@
-
-import { useEffect, useState } from "react";
-import { checkBackend } from "./api";
+import { useEffect, useRef, useState } from "react";
+import axios from "axios";
+import { io } from "socket.io-client";
 import "./App.css";
 
-const initialContacts = [
-  {
-    id: 1,
-    name: "Rahul",
-    avatar: "R",
-    color: "#dbeafe",
-    online: true,
-    messages: [
-      { id: 1, text: "Hey! How are you?", from: "them", time: "10:30 AM" },
-      { id: 2, text: "I'm good! How about you?", from: "me", time: "10:31 AM" },
-      { id: 3, text: "Shall we work on our project?", from: "them", time: "10:32 AM" },
-    ],
-  },
-  {
-    id: 2,
-    name: "Priya",
-    avatar: "P",
-    color: "#fce7f3",
-    online: true,
-    messages: [
-      { id: 1, text: "Hello! Welcome to ChatApp.", from: "them", time: "09:15 AM" },
-    ],
-  },
-  {
-    id: 3,
-    name: "Kiran",
-    avatar: "K",
-    color: "#dcfce7",
-    online: false,
-    messages: [
-      { id: 1, text: "Let's connect later.", from: "them", time: "Yesterday" },
-    ],
-  },
-  {
-    id: 4,
-    name: "Sneha",
-    avatar: "S",
-    color: "#fef3c7",
-    online: true,
-    messages: [],
-  },
-];
+const API = "http://127.0.0.1:5000";
+const COLORS = ["#dbeafe", "#fce7f3", "#dcfce7", "#fef3c7", "#ede9fe", "#ffedd5"];
+
+const getStoredUser = () => {
+  try {
+    return JSON.parse(localStorage.getItem("user")) || null;
+  } catch {
+    return null;
+  }
+};
+
+// Two users ki common room id (backend lo kuda same logic)
+const roomFor = (a, b) => [a, b].sort().join("_");
+
+const colorFor = (str = "") =>
+  COLORS[[...str].reduce((sum, ch) => sum + ch.charCodeAt(0), 0) % COLORS.length];
+
+const formatTime = (date) =>
+  new Date(date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
 export default function App() {
-  const [screen, setScreen] = useState("login");
-  const [userName, setUserName] = useState("");
+  // Auth state
+  const [token, setToken] = useState(localStorage.getItem("token"));
+  const [me, setMe] = useState(getStoredUser());
+  const [mode, setMode] = useState("login"); // "login" | "signup"
+  const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [activeId, setActiveId] = useState(1);
-  const [contacts, setContacts] = useState(initialContacts);
-  const [message, setMessage] = useState("");
-  const [search, setSearch] = useState("");
-  const [backendStatus, setBackendStatus] = useState("Checking...");
   const [authLoading, setAuthLoading] = useState(false);
+  const [backendStatus, setBackendStatus] = useState("Checking...");
 
+  // Chat state
+  const [users, setUsers] = useState([]);
+  const [activeUser, setActiveUser] = useState(null);
+  const [messagesByRoom, setMessagesByRoom] = useState({});
+  const [text, setText] = useState("");
+  const [search, setSearch] = useState("");
+
+  const socketRef = useRef(null);
+  const activeRoomRef = useRef(null);
+
+  const activeRoom = activeUser && me ? roomFor(me.id, activeUser._id) : null;
+  activeRoomRef.current = activeRoom;
+
+  const authConfig = { headers: { Authorization: `Bearer ${token}` } };
+
+  // Backend health check (login screen lo status chupinchadaniki)
   useEffect(() => {
-    checkBackend()
+    fetch(`${API}/api/health`)
+      .then((res) => res.json())
       .then((data) => setBackendStatus(data.message))
       .catch(() => setBackendStatus("Backend connection failed"));
   }, []);
 
-  const activeContact = contacts.find((c) => c.id === activeId);
+  function logout() {
+    socketRef.current?.disconnect();
+    localStorage.removeItem("token");
+    localStorage.removeItem("user");
+    setToken(null);
+    setMe(null);
+    setUsers([]);
+    setActiveUser(null);
+    setMessagesByRoom({});
+    setPassword("");
+  }
+
+  // Token vunte socket connect + users load
+  useEffect(() => {
+    if (!token) return;
+
+    const socket = io(API, { auth: { token } });
+    socketRef.current = socket;
+
+    // Reconnect ayithe current room lo malli join avvali
+    socket.on("connect", () => {
+      if (activeRoomRef.current) socket.emit("joinRoom", activeRoomRef.current);
+    });
+
+    socket.on("receiveMessage", (msg) => {
+      setMessagesByRoom((prev) => ({
+        ...prev,
+        [msg.room]: [...(prev[msg.room] || []), msg],
+      }));
+    });
+
+    socket.on("errorMessage", (msg) => alert(msg));
+
+    socket.on("connect_error", (err) => {
+      console.error("Socket error:", err.message);
+    });
+
+    axios
+      .get(`${API}/api/users`, { headers: { Authorization: `Bearer ${token}` } })
+      .then((res) => setUsers(res.data.users))
+      .catch((err) => {
+        console.error("Users load failed:", err);
+        // Token expire ayithe logout
+        if (err.response?.status === 401) logout();
+      });
+
+    return () => socket.disconnect();
+  }, [token]);
 
   async function handleAuth(e) {
     e.preventDefault();
 
-    const cleanEmail = email.trim();
+    const cleanEmail = email.trim().toLowerCase();
 
+    if (mode === "signup" && !name.trim()) {
+      alert("Please enter your name.");
+      return;
+    }
     if (!cleanEmail || !password) {
       alert("Please enter email and password.");
       return;
     }
-
-    if (screen === "signup" && !userName.trim()) {
-      alert("Please enter your name.");
-      return;
-    }
-
     if (password.length < 6) {
       alert("Password must be at least 6 characters.");
       return;
@@ -89,76 +127,71 @@ export default function App() {
     setAuthLoading(true);
 
     try {
-      // Current backend provides a test login endpoint only.
-      // Signup is not implemented on the backend yet.
-      if (screen === "signup") {
-        alert("Signup API is not implemented yet. Please use Login to test the API.");
-        return;
-      }
-
-      const response = await fetch("http://localhost:5000/api/login", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
+      if (mode === "signup") {
+        await axios.post(`${API}/api/register`, {
+          name: name.trim(),
           email: cleanEmail,
           password,
-        }),
-      });
-
-      const data = await response.json();
-
-      if (!response.ok || !data.success) {
-        alert(data.message || "Login failed.");
-        return;
+        });
       }
 
-      setUserName(cleanEmail.split("@")[0]);
-      setScreen("chat");
+      const { data } = await axios.post(`${API}/api/login`, {
+        email: cleanEmail,
+        password,
+      });
+
+      const user = { id: data.user.id, name: data.user.name, email: data.user.email };
+
+      localStorage.setItem("token", data.token);
+      localStorage.setItem("user", JSON.stringify(user));
+
+      setToken(data.token);
+      setMe(user);
+      setName("");
       setPassword("");
-    } catch (error) {
-      console.error("Login error:", error);
-      alert("Backend connection failed. Please check your server.");
+    } catch (err) {
+      alert(err.response?.data?.message || "Backend connection failed. Please check your server.");
     } finally {
       setAuthLoading(false);
+    }
+  }
+
+  async function openChat(user) {
+    const room = roomFor(me.id, user._id);
+    setActiveUser(user);
+    socketRef.current?.emit("joinRoom", room);
+
+    try {
+      const { data } = await axios.get(`${API}/api/messages/${room}`, authConfig);
+
+      // Old messages + socket lo ippatike vachina messages merge (duplicates ledu)
+      setMessagesByRoom((prev) => {
+        const existing = prev[room] || [];
+        const ids = new Set(data.messages.map((m) => m._id));
+        return {
+          ...prev,
+          [room]: [...data.messages, ...existing.filter((m) => !ids.has(m._id))],
+        };
+      });
+    } catch (err) {
+      console.error("Messages load failed:", err);
+      alert(err.response?.data?.message || "Messages load cheyyaledu");
     }
   }
 
   function sendMessage(e) {
     e.preventDefault();
 
-    const text = message.trim();
+    const clean = text.trim();
+    if (!clean || !activeRoom) return;
 
-    if (!text || !activeContact) return;
-
-    const newMessage = {
-      id: Date.now(),
-      text,
-      from: "me",
-      time: new Date().toLocaleTimeString([], {
-        hour: "2-digit",
-        minute: "2-digit",
-      }),
-    };
-
-    setContacts((old) =>
-      old.map((contact) =>
-        contact.id === activeId
-          ? { ...contact, messages: [...contact.messages, newMessage] }
-          : contact
-      )
-    );
-
-    setMessage("");
+    // Server save chesi room lo andariki pampisthundi (receiveMessage)
+    socketRef.current?.emit("sendMessage", { room: activeRoom, text: clean });
+    setText("");
   }
 
-  function logout() {
-    setPassword("");
-    setScreen("login");
-  }
-
-  if (screen !== "chat") {
+  // ---------- Login / Signup screen ----------
+  if (!token || !me) {
     return (
       <main className="auth-page">
         <section className="auth-card">
@@ -169,18 +202,18 @@ export default function App() {
           </h1>
 
           <p className="muted">
-            {screen === "login"
+            {mode === "login"
               ? "Welcome back! Sign in to continue."
               : "Create your account and start chatting."}
           </p>
 
           <form onSubmit={handleAuth} className="auth-form">
-            {screen === "signup" && (
+            {mode === "signup" && (
               <label>
                 Full name
                 <input
-                  value={userName}
-                  onChange={(e) => setUserName(e.target.value)}
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
                   placeholder="Enter your name"
                   required
                 />
@@ -206,45 +239,30 @@ export default function App() {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="Minimum 6 characters"
-                autoComplete={
-                  screen === "login" ? "current-password" : "new-password"
-                }
+                autoComplete={mode === "login" ? "current-password" : "new-password"}
                 minLength={6}
                 required
               />
             </label>
 
-            <button
-              className="primary-btn"
-              type="submit"
-              disabled={authLoading}
-            >
+            <button className="primary-btn" type="submit" disabled={authLoading}>
               {authLoading
                 ? "Please wait..."
-                : screen === "login"
+                : mode === "login"
                   ? "Login"
                   : "Create account"}
             </button>
           </form>
 
           <p className="auth-switch">
-            {screen === "login"
-              ? "Don't have an account?"
-              : "Already registered?"}
-
+            {mode === "login" ? "Don't have an account?" : "Already registered?"}
             <button
               className="text-btn"
               type="button"
-              onClick={() =>
-                setScreen(screen === "login" ? "signup" : "login")
-              }
+              onClick={() => setMode(mode === "login" ? "signup" : "login")}
             >
-              {screen === "login" ? "Sign up" : "Login"}
+              {mode === "login" ? "Sign up" : "Login"}
             </button>
-          </p>
-
-          <p className="demo-note">
-            Test login only — user accounts are not saved yet.
           </p>
 
           <p>
@@ -254,6 +272,13 @@ export default function App() {
       </main>
     );
   }
+
+  // ---------- Chat screen ----------
+  const filteredUsers = users.filter((u) =>
+    u.name.toLowerCase().includes(search.toLowerCase())
+  );
+
+  const currentMessages = activeRoom ? messagesByRoom[activeRoom] || [] : [];
 
   return (
     <main className="chat-app">
@@ -266,22 +291,16 @@ export default function App() {
             <span className="muted">Messages made simple</span>
           </div>
 
-          <button
-            className="icon-btn"
-            title="Logout"
-            onClick={logout}
-          >
+          <button className="icon-btn" title="Logout" onClick={logout}>
             ↪
           </button>
         </header>
 
         <div className="profile-row">
-          <div className="avatar my-avatar">
-            {(userName || "U").charAt(0).toUpperCase()}
-          </div>
+          <div className="avatar my-avatar">{me.name.charAt(0).toUpperCase()}</div>
 
           <div>
-            <strong>{userName || "You"}</strong>
+            <strong>{me.name}</strong>
             <span className="online-label">● Available</span>
           </div>
         </div>
@@ -296,59 +315,48 @@ export default function App() {
         />
 
         <div className="contact-list">
-          {contacts
-            .filter((c) =>
-              c.name.toLowerCase().includes(search.toLowerCase())
-            )
-            .map((contact) => {
-              const last = contact.messages[contact.messages.length - 1];
+          {filteredUsers.length === 0 && (
+            <p className="muted" style={{ padding: 12 }}>
+              Inka vere users ledu.
+            </p>
+          )}
 
-              return (
-                <button
-                  key={contact.id}
-                  className={`contact ${
-                    activeId === contact.id ? "selected" : ""
-                  }`}
-                  onClick={() => setActiveId(contact.id)}
-                >
-                  <div
-                    className="avatar"
-                    style={{ backgroundColor: contact.color }}
-                  >
-                    {contact.avatar}
-                    {contact.online && <i className="online-dot" />}
-                  </div>
+          {filteredUsers.map((user) => {
+            const room = roomFor(me.id, user._id);
+            const roomMsgs = messagesByRoom[room] || [];
+            const last = roomMsgs[roomMsgs.length - 1];
 
-                  <div className="contact-info">
-                    <strong>{contact.name}</strong>
-                    <span>{last ? last.text : "Start a conversation"}</span>
-                  </div>
-                </button>
-              );
-            })}
+            return (
+              <button
+                key={user._id}
+                className={`contact ${activeUser?._id === user._id ? "selected" : ""}`}
+                onClick={() => openChat(user)}
+              >
+                <div className="avatar" style={{ backgroundColor: colorFor(user.name) }}>
+                  {user.name.charAt(0).toUpperCase()}
+                </div>
+
+                <div className="contact-info">
+                  <strong>{user.name}</strong>
+                  <span>{last ? last.text : "Start a conversation"}</span>
+                </div>
+              </button>
+            );
+          })}
         </div>
       </aside>
 
       <section className="conversation">
-        {activeContact ? (
+        {activeUser ? (
           <>
             <header className="conversation-header">
-              <div
-                className="avatar"
-                style={{ backgroundColor: activeContact.color }}
-              >
-                {activeContact.avatar}
+              <div className="avatar" style={{ backgroundColor: colorFor(activeUser.name) }}>
+                {activeUser.name.charAt(0).toUpperCase()}
               </div>
 
               <div>
-                <h2>{activeContact.name}</h2>
-                <span
-                  className={
-                    activeContact.online ? "online-label" : "muted"
-                  }
-                >
-                  {activeContact.online ? "● Online" : "Offline"}
-                </span>
+                <h2>{activeUser.name}</h2>
+                <span className="muted">{activeUser.email}</span>
               </div>
             </header>
 
@@ -357,24 +365,26 @@ export default function App() {
                 <span>Today</span>
               </div>
 
-              {activeContact.messages.map((msg) => (
-                <div
-                  key={msg.id}
-                  className={`message-row ${
-                    msg.from === "me" ? "mine" : ""
-                  }`}
-                >
-                  <div className="message-bubble">
-                    <p>{msg.text}</p>
-                    <span>{msg.time}</span>
-                  </div>
-                </div>
-              ))}
+              {currentMessages.map((msg) => {
+                const isMine = msg.sender === me.id;
 
-              {activeContact.messages.length === 0 && (
+                return (
+                  <div
+                    key={msg._id}
+                    className={`message-row ${isMine ? "mine" : ""}`}
+                  >
+                    <div className="message-bubble">
+                      <p>{msg.text}</p>
+                      <span>{formatTime(msg.createdAt)}</span>
+                    </div>
+                  </div>
+                );
+              })}
+
+              {currentMessages.length === 0 && (
                 <div className="empty-chat">
                   <div className="empty-icon">✉</div>
-                  <h3>Say hello to {activeContact.name}!</h3>
+                  <h3>Say hello to {activeUser.name}!</h3>
                   <p>Your conversation starts here.</p>
                 </div>
               )}
@@ -382,25 +392,19 @@ export default function App() {
 
             <form className="message-form" onSubmit={sendMessage}>
               <input
-                value={message}
-                onChange={(e) => setMessage(e.target.value)}
-                placeholder={`Message ${activeContact.name}...`}
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                placeholder={`Message ${activeUser.name}...`}
                 aria-label="Type your message"
               />
 
-              <button
-                type="submit"
-                className="send-btn"
-                disabled={!message.trim()}
-              >
+              <button type="submit" className="send-btn" disabled={!text.trim()}>
                 Send <span>➤</span>
               </button>
             </form>
           </>
         ) : (
-          <div className="empty-chat">
-            Select a contact to start chatting.
-          </div>
+          <div className="empty-chat">Select a contact to start chatting.</div>
         )}
       </section>
     </main>
